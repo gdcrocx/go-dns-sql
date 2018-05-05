@@ -2,11 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"database/sql"
-	"fmt"
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,7 +28,7 @@ func main() {
 
 	wg.Add(1)
 	go func() {
-		log.Printf("Hello World!")
+		log.Println("Hello World!")
 		wg.Done()
 	}()
 
@@ -47,7 +48,7 @@ func main() {
 	// go selectDNSLookup(db, dn)
 	// go insertDNSAlias(db, dn, ip)
 
-	log.Printf("Closing...")
+	log.Println("Closing...")
 
 	wg.Wait()
 
@@ -57,7 +58,7 @@ func createDBConnection() (db *sql.DB) {
 
 	db, err := sql.Open("mysql", "golang:golang@tcp(127.0.0.1:3306)/golang_db")
 
-	// log.Printf(reflect.TypeOf(db).String())
+	// log.Println(reflect.TypeOf(db).String())
 
 	if err != nil {
 		panic(err.Error())
@@ -72,53 +73,107 @@ func selectDNSLookup(db *sql.DB, dn string) {
 
 	var results dnslookup
 
-	fmt.Println(dn)
+	log.Println("Query Keyword - ", dn, reflect.TypeOf(dn).String())
 
-	fmt.Println(reflect.TypeOf(dn))
+	var buffer bytes.Buffer
+	buffer.WriteString("%")
+	buffer.WriteString(strings.Trim(dn, "\n"))
+	buffer.WriteString("%")
 
-	err := db.QueryRow("SELECT dn, ip FROM golang_db.dnslookup WHERE dn = ?", string(dn)).Scan(&results.dn, &results.ip)
+	err := db.QueryRow("SELECT dn, ip FROM golang_db.dnslookup WHERE dn like ?;", buffer.String()).Scan(&results.dn, &results.ip)
 
 	if err != nil {
-		log.Printf(err.Error())
-		// fmt.Println("No record found.")
+		log.Println("Error : ", err.Error())
+		// log.Println("No record found.")
 		// panic(err.Error())
 		recover()
 	} else {
-		fmt.Println("Found ", results.dn)
+		log.Println("Found", results.dn, results.ip)
 	}
 
 	wg.Done()
 
 }
 
-func insertDNSAlias(db *sql.DB, dn string, ip string) {
+func updateDNSAlias(db *sql.DB, dn string, ip string) {
 
 	wg.Add(1)
 
-	stmtIns, err := db.Query("INSERT INTO golang_db.dnslookup (dn, ip) VALUES (?,?);", dn, ip)
+	var results dnslookup
+
+	var buffer bytes.Buffer
+	buffer.WriteString("%")
+	buffer.WriteString(strings.Trim(dn, "\n"))
+	buffer.WriteString("%")
+
+	err := db.QueryRow("SELECT dn, ip FROM golang_db.dnslookup WHERE dn like ?;", buffer.String()).Scan(&results.dn, &results.ip)
 
 	if err != nil {
-		log.Printf(err.Error())
-		// panic(err.Error())
+		log.Println("Error : ", err.Error())
+		if strings.Contains(err.Error(), "no rows in result set") {
+			stmtIns, err := db.Query("INSERT INTO golang_db.dnslookup (dn, ip) VALUES (?,?);", dn, ip)
+
+			if err != nil {
+				log.Println("Error : ", err.Error())
+				// panic(err.Error())
+				recover()
+			} else {
+				log.Println("Added", dn, " = ", ip, ".")
+			}
+
+			defer stmtIns.Close()
+		}
 		recover()
 	} else {
-		fmt.Println(dn, " = ", ip, " Added.")
+		if results.dn != "" && results.ip != "" {
+			log.Println("Found", results.dn, results.ip)
+			stmtUpd, err := db.Query("UPDATE golang_db.dnslookup SET ip = ? WHERE dn like ?;", ip, dn)
+
+			if err != nil {
+				log.Println("Error : ", err.Error())
+				recover()
+			} else {
+				log.Println("Updated", dn, " = ", ip, ".")
+			}
+
+			defer stmtUpd.Close()
+		}
+	}
+	wg.Done()
+
+}
+
+func dropDNSAlias(db *sql.DB, dn string) {
+
+	wg.Add(1)
+
+	var buffer bytes.Buffer
+	buffer.WriteString("%")
+	buffer.WriteString(strings.Trim(dn, "\n"))
+	buffer.WriteString("%")
+
+	err := db.QueryRow("DELETE * FROM golang_db.dnslookup WHERE dn like ?;", buffer.String())
+
+	if err != nil {
+		log.Println(err)
+		recover()
+	} else {
+		log.Println("Deleted", dn)
 	}
 
-	defer stmtIns.Close()
 	wg.Done()
 
 }
 
 func dnsListener(port string) {
 
-	fmt.Println("Starting DNS Listener...")
+	log.Println("Starting DNS Listener...")
 
 	ln, err := net.Listen("tcp", ":53")
 
 	if err != nil {
 		// handle error
-		fmt.Println("Error creating connection... Closing DNS Listener..")
+		log.Println("Error creating connection... Closing DNS Listener..")
 		wg.Done()
 	}
 
@@ -129,27 +184,27 @@ func dnsListener(port string) {
 
 		if err != nil {
 			// handle error
-			fmt.Println("Error accepting connection...")
+			log.Println("Error accepting connection...")
 			wg.Done()
 		}
 
 		go handleConnection(conn)
 	}
 
-	fmt.Println("Signal for closure of DNS Listener...")
+	log.Println("Signal for closure of DNS Listener...")
 
 }
 
 func handleConnection(conn net.Conn) {
-	fmt.Println("Handling new connection...")
+	log.Println("Handling new connection...")
 
 	// Close connection when this function ends
 	defer func() {
-		fmt.Println("Closing connection...")
+		log.Println("Closing connection...")
 		conn.Close()
 	}()
 
-	timeoutDuration := 5 * time.Second
+	timeoutDuration := 3600 * time.Second
 	bufReader := bufio.NewReader(conn)
 
 	for {
@@ -160,16 +215,28 @@ func handleConnection(conn net.Conn) {
 		// Read tokens delimited by newline
 		bytes, err := bufReader.ReadBytes('\n')
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 			return
 		}
 
-		fmt.Printf("%s", bytes)
-		// fmt.Println(reflect.TypeOf(bytes))
-		inputString := string(bytes[:len(bytes)])
+		// log.Println("%s", bytes)
+		// log.Println(reflect.TypeOf(bytes))
+		inputString := strings.Trim(string(bytes[:len(bytes)]), "\n\t\r")
 
 		db := createDBConnection()
 
-		go selectDNSLookup(db, inputString)
+		if strings.Contains(inputString, "update") {
+			// Pulling keyword 'update' from the inputString
+			inputString = strings.Replace(inputString, "update", "", 1)
+			// Splitting strings with the '=' to get the domainName and ipAddress
+			inputs := strings.Split(inputString, "=")
+			go updateDNSAlias(db, inputs[0], inputs[1])
+		} else if strings.Contains(inputString, "drop") {
+			// Pulling keyword 'drop' from the inputString
+			inputString = strings.Replace(inputString, "drop", "", 1)
+			go dropDNSAlias(db, inputString)
+		} else {
+			go selectDNSLookup(db, inputString)
+		}
 	}
 }
